@@ -1,55 +1,46 @@
+import requests
+from bs4 import BeautifulSoup
+import bson
+import hashlib
+from sqlalchemy import create_engine, Column, String, LargeBinary, DateTime
+from sqlalchemy.orm import sessionmaker, declarative_base
+from apscheduler.schedulers.blocking import BlockingScheduler
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 import os
 import time
-import requests
-import logging
-from telegram import Bot
-import psycopg2
-from psycopg2 import sql
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Load environment variables from .env file
+load_dotenv()
 
-# Load environment variables
+# SQLAlchemy setup for PostgreSQL
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Telegram bot setup
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Initialize the Telegram bot
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# Function to check if the database is ready
-def check_database_connection():
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.close()
-        logging.info("Connected to the database successfully.")
-        return True
-    except Exception as e:
-        logging.error(f"Database connection error: {e}")
-        return False
+# Create the SQLAlchemy engine
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
 
-URLS = os.getenv('URLS')
+# Base class for declarative models
+Base = declarative_base()
 
-if URLS:
-    URLS = [url.strip() for url in URLS.split(",") if url.strip()]
-else:
-    print("No URLs found.")
+# Define the WebsiteState model (equivalent to a table)
+class WebsiteState(Base):
+    __tablename__ = "website_states"
+    
+    url = Column(String, primary_key=True, index=True)
+    last_fetched = Column(DateTime, default=datetime.now)
+    html_bson = Column(LargeBinary)
+    content_hash = Column(String)
 
-# Function to check the website
-def check_website():
-    for url in URLS:
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                logging.info(f"{url} is up!")
-            else:
-                logging.warning(f"{url} returned status code {response.status_code}")
-                send_telegram_message(f"{url} is down! Status code: {response.status_code}")
-        except Exception as e:
-            logging.error(f"Error checking {url}: {e}")
-            send_telegram_message(f"Error checking {url}: {e}")
+# Initialize the database schema (if not already created)
+def create_tables():
+    Base.metadata.create_all(bind=engine)
 
-# Function to send alerts to Telegram
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -58,23 +49,102 @@ def send_telegram_message(message):
     }
     requests.post(url, data=payload)
 
-# Main function to control the flow of the application
-def main():
-    database_ready = False
+URLS = os.getenv('URLS')
 
-    # Wait for the database to be ready
-    while not database_ready:
-        database_ready = check_database_connection()
-        if not database_ready:
-            logging.info("Waiting for database...")
-            time.sleep(5)  # Wait before retrying
+# If the URLs are separated by commas, split them into a list
+if URLS:
+    URLS = [url.strip() for url in URLS.split(',') if url.strip()]
 
-    interval = 60  # Check every 60 seconds
+def fetch_content(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+    }
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    return response.text
 
-    # Start checking the website
+# Hash the content to detect changes
+def hash_content(content):
+    soup = BeautifulSoup(content, "html.parser")
+    text = soup.get_text()  # Extract textual content
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+# Save or update the website state
+def save_website_state(db_session, url, content, content_hash):
+    # Encode content as BSON
+    bson_data = bson.dumps({'html': content})
+    
+    # Check if the URL already exists in the database
+    state = db_session.query(WebsiteState).filter_by(url=url).first()
+    
+    if state:
+        # Update existing record
+        state.last_fetched = datetime.now()
+        state.html_bson = bson_data
+        state.content_hash = content_hash
+    else:
+        # Insert new record
+        new_state = WebsiteState(
+            url=url,
+            last_fetched=datetime.now(),
+            html_bson=bson_data,
+            content_hash=content_hash
+        )
+        db_session.add(new_state)
+
+    # Commit the transaction
+    db_session.commit()
+
+# Check if content has changed by comparing hashes
+def has_content_changed(db_session, url, new_content_hash):
+    state = db_session.query(WebsiteState).filter_by(url=url).first()
+    
+    if state is None:
+        return True  # No previous record, treat as changed
+    
+    return state.content_hash != new_content_hash
+
+# Main function to check the website for changes
+def check_website(url):
+    db_session = SessionLocal()
+    
+    try:
+        print(f'getting content for {url}')
+        content = fetch_content(url)
+        new_hash = hash_content(content)
+
+        if has_content_changed(db_session, url, new_hash):
+            message = f"Content has changed for {url}"
+            print(message)
+            send_telegram_message(message)
+            save_website_state(db_session, url, content, new_hash)
+        else:
+            print(f"No changes for {url}")
+
+    except Exception as e:
+        print(f"Error checking {url}: {e}")
+        send_telegram_message(f"Error checking {url}: {e}")
+
+    finally:
+        db_session.close()
+
+# Scheduler to periodically check the websites
+def schedule_checks():
+    #scheduler = BlockingScheduler()
+    
+    # Run the check every hour for each URL
     while True:
-        check_website()
-        time.sleep(interval)
+        for url in URLS:
+            check_website(url)
+            time.sleep(2)
+        
+        time.sleep(60)
+        
+
 
 if __name__ == "__main__":
-    main()
+    # Create the database tables
+    create_tables()
+    
+    # Start the periodic checks
+    schedule_checks()
