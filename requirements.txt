@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+sqlalchemy
+apscheduler
+psycopg2-binary
+bson
+python-dotenv
