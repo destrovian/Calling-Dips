@@ -108,6 +108,7 @@ def check_website(url):
     db_session = SessionLocal()
     
     try:
+        print(f'getting content for {url}')
         content = fetch_content(url)
         new_hash = hash_content(content)
 
