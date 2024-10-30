@@ -4,7 +4,9 @@ import bson
 import hashlib
 from sqlalchemy import create_engine, Column, String, LargeBinary, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
-from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.background import BlockingScheduler
+import atexit
+
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
@@ -18,6 +20,10 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Telegram bot setup
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+print("DATABASE_URL:", DATABASE_URL)
+print("TELEGRAM_BOT_TOKEN:", TELEGRAM_BOT_TOKEN)
+print("TELEGRAM_CHAT_ID:", TELEGRAM_CHAT_ID)
 
 
 # Create the SQLAlchemy engine
@@ -38,7 +44,11 @@ class WebsiteState(Base):
 
 # Initialize the database schema (if not already created)
 def create_tables():
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("Tables created successfully.")
+    except Exception as e:
+        print("Failed to create tables:", e)
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -50,17 +60,24 @@ def send_telegram_message(message):
 
 URLS = os.getenv('URLS')
 
-# If the URLs are separated by commas, split them into a list
 if URLS:
-    URLS = [url.strip() for url in URLS.split(',') if url.strip()]
+    URLS = [url.strip() for url in URLS.split(",") if url.strip()]
+else:
+    print("No URLs found.")
+
+print(URLS)
 
 def fetch_content(url):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
     }
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    return response.text
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch {url}: {e}")
+        return None  # Return None or handle as needed
 
 # Hash the content to detect changes
 def hash_content(content):
@@ -114,7 +131,6 @@ def check_website(url):
 
         if has_content_changed(db_session, url, new_hash):
             message = f"Content has changed for {url}"
-            print(message)
             send_telegram_message(message)
             save_website_state(db_session, url, content, new_hash)
         else:
@@ -130,13 +146,17 @@ def check_website(url):
 # Scheduler to periodically check the websites
 def schedule_checks():
     scheduler = BlockingScheduler()
-    
-    # Run the check every hour for each URL
     for url in URLS:
-        scheduler.add_job(check_website, 'interval', minutes=30, args=[url], next_run_time=datetime.now())
+        scheduler.add_job(check_website, 'interval', minutes=1, args=[url], next_run_time=datetime.now(), max_instances=2)
+
+    # Register shutdown handler to ensure graceful shutdown
+    atexit.register(lambda: scheduler.shutdown(wait=False))
     
     print("Starting scheduler...")
-    scheduler.start()
+    try:
+        scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 if __name__ == "__main__":
     # Create the database tables
