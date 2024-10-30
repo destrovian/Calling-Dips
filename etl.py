@@ -1,62 +1,32 @@
-import requests
-from bs4 import BeautifulSoup
-import bson
-import hashlib
-from sqlalchemy import create_engine, Column, String, LargeBinary, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base
-from apscheduler.schedulers.background import BlockingScheduler
-import atexit
-
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
 import os
+import time
+import requests
+import logging
+from telegram import Bot
+import psycopg2
+from psycopg2 import sql
 
-# Load environment variables from .env file
-load_dotenv()
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 
-# SQLAlchemy setup for PostgreSQL
+# Load environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# Telegram bot setup
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-print("DATABASE_URL:", DATABASE_URL)
-print("TELEGRAM_BOT_TOKEN:", TELEGRAM_BOT_TOKEN)
-print("TELEGRAM_CHAT_ID:", TELEGRAM_CHAT_ID)
+# Initialize the Telegram bot
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-
-# Create the SQLAlchemy engine
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
-
-# Base class for declarative models
-Base = declarative_base()
-
-# Define the WebsiteState model (equivalent to a table)
-class WebsiteState(Base):
-    __tablename__ = "website_states"
-    
-    url = Column(String, primary_key=True, index=True)
-    last_fetched = Column(DateTime, default=datetime.now)
-    html_bson = Column(LargeBinary)
-    content_hash = Column(String)
-
-# Initialize the database schema (if not already created)
-def create_tables():
+# Function to check if the database is ready
+def check_database_connection():
     try:
-        Base.metadata.create_all(bind=engine)
-        print("Tables created successfully.")
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.close()
+        logging.info("Connected to the database successfully.")
+        return True
     except Exception as e:
-        print("Failed to create tables:", e)
-
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': message
-    }
-    requests.post(url, data=payload)
+        logging.error(f"Database connection error: {e}")
+        return False
 
 URLS = os.getenv('URLS')
 
@@ -65,102 +35,45 @@ if URLS:
 else:
     print("No URLs found.")
 
-print(URLS)
-
-def fetch_content(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
-    }
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.text
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch {url}: {e}")
-        return None  # Return None or handle as needed
-
-# Hash the content to detect changes
-def hash_content(content):
-    soup = BeautifulSoup(content, "html.parser")
-    text = soup.get_text()  # Extract textual content
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()
-
-# Save or update the website state
-def save_website_state(db_session, url, content, content_hash):
-    # Encode content as BSON
-    bson_data = bson.dumps({'html': content})
-    
-    # Check if the URL already exists in the database
-    state = db_session.query(WebsiteState).filter_by(url=url).first()
-    
-    if state:
-        # Update existing record
-        state.last_fetched = datetime.now()
-        state.html_bson = bson_data
-        state.content_hash = content_hash
-    else:
-        # Insert new record
-        new_state = WebsiteState(
-            url=url,
-            last_fetched=datetime.now(),
-            html_bson=bson_data,
-            content_hash=content_hash
-        )
-        db_session.add(new_state)
-
-    # Commit the transaction
-    db_session.commit()
-
-# Check if content has changed by comparing hashes
-def has_content_changed(db_session, url, new_content_hash):
-    state = db_session.query(WebsiteState).filter_by(url=url).first()
-    
-    if state is None:
-        return True  # No previous record, treat as changed
-    
-    return state.content_hash != new_content_hash
-
-# Main function to check the website for changes
-def check_website(url):
-    db_session = SessionLocal()
-    
-    try:
-        print(f'getting content for {url}')
-        content = fetch_content(url)
-        new_hash = hash_content(content)
-
-        if has_content_changed(db_session, url, new_hash):
-            message = f"Content has changed for {url}"
-            send_telegram_message(message)
-            save_website_state(db_session, url, content, new_hash)
-        else:
-            print(f"No changes for {url}")
-
-    except Exception as e:
-        print(f"Error checking {url}: {e}")
-        send_telegram_message(f"Error checking {url}: {e}")
-
-    finally:
-        db_session.close()
-
-# Scheduler to periodically check the websites
-def schedule_checks():
-    scheduler = BlockingScheduler()
+# Function to check the website
+def check_website():
     for url in URLS:
-        scheduler.add_job(check_website, 'interval', minutes=1, args=[url], next_run_time=datetime.now(), max_instances=2)
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                logging.info(f"{url} is up!")
+            else:
+                logging.warning(f"{url} returned status code {response.status_code}")
+                send_alert(f"{url} is down! Status code: {response.status_code}")
+        except Exception as e:
+            logging.error(f"Error checking {url}: {e}")
+            send_alert(f"Error checking {url}: {e}")
 
-    # Register shutdown handler to ensure graceful shutdown
-    atexit.register(lambda: scheduler.shutdown(wait=False))
-    
-    print("Starting scheduler...")
+# Function to send alerts to Telegram
+def send_alert(message):
     try:
-        scheduler.start()
-    except (KeyboardInterrupt, SystemExit):
-        pass
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+        logging.info("Alert sent to Telegram.")
+    except Exception as e:
+        logging.error(f"Failed to send alert: {e}")
+
+# Main function to control the flow of the application
+def main():
+    database_ready = False
+
+    # Wait for the database to be ready
+    while not database_ready:
+        database_ready = check_database_connection()
+        if not database_ready:
+            logging.info("Waiting for database...")
+            time.sleep(5)  # Wait before retrying
+
+    interval = 60  # Check every 60 seconds
+
+    # Start checking the website
+    while True:
+        check_website()
+        time.sleep(interval)
 
 if __name__ == "__main__":
-    # Create the database tables
-    create_tables()
-    
-    # Start the periodic checks
-    schedule_checks()
+    main()
