@@ -44,18 +44,19 @@ def check_website():
                 logging.info(f"{url} is up!")
             else:
                 logging.warning(f"{url} returned status code {response.status_code}")
-                send_alert(f"{url} is down! Status code: {response.status_code}")
+                send_telegram_message(f"{url} is down! Status code: {response.status_code}")
         except Exception as e:
             logging.error(f"Error checking {url}: {e}")
-            send_alert(f"Error checking {url}: {e}")
+            send_telegram_message(f"Error checking {url}: {e}")
 
 # Function to send alerts to Telegram
-def send_alert(message):
-    try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logging.info("Alert sent to Telegram.")
-    except Exception as e:
-        logging.error(f"Failed to send alert: {e}")
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message
+    }
+    requests.post(url, data=payload)
 
 # Main function to control the flow of the application
 def main():
