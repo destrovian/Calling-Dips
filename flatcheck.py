@@ -3,6 +3,7 @@ import hashlib
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from apscheduler.schedulers.blocking import BlockingScheduler
 import time
 
 # Load environment variables from .env file
@@ -78,35 +79,36 @@ def save_website_state(url, content, new_content_hash):
         f.write(content)
 
 # Main function to check the website for changes
-def check_website(url):
-    try:
-        content = fetch_content(url)
-        normalized_content = normalize_content(content)
-        new_hash = hash_content(normalized_content)
+def check_website(url_list):
+    for url in url_list:
+        try:
+            content = fetch_content(url)
+            normalized_content = normalize_content(content)
+            new_hash = hash_content(normalized_content)
 
-        if has_content_changed(url, new_hash):
-            message = f"Content has changed for {url}"
-            print(message)
-            send_telegram_message(message)
-            save_website_state(url, content, new_hash)
-        else:
-            print(f"No changes for {url}")
+            if has_content_changed(url, new_hash):
+                message = f"Content has changed for {url}"
+                print(message)
+                send_telegram_message(message)
+                save_website_state(url, content, new_hash)
+            else:
+                print(f"No changes for {url}")
 
-    except Exception as e:
-        print(f"Error checking {url}: {e}")
-        send_telegram_message(f"Error checking {url}: {e}")
+        except Exception as e:
+            print(f"Error checking {url}: {e}")
+            send_telegram_message(f"Error checking {url}: {e}")
 
 def schedule_checks():
-    #scheduler = BlockingScheduler()
-    
-    # Run the check every hour for each URL
-    while True:
-        for url in URLS:
-            check_website(url)
-            time.sleep(2)
-        
-        time.sleep(1200)
+    scheduler = BlockingScheduler()
+
+    # Perform an initial check on deploy
+    check_website(URLS)
+
+    # Schedule each URL to be checked every hour
+    scheduler.add_job(check_website, 'interval', minutes=30, args=[URLS])
+
+    # Start the scheduler to handle the interval checks
+    scheduler.start()
 
 if __name__ == "__main__":
-    # Start the periodic checks
     schedule_checks()
