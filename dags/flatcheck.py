@@ -36,7 +36,7 @@ with DAG(
     'website_change_detection',
     default_args=default_args,
     description='A DAG to detect changes in website content',
-    schedule_interval=timedelta(hours=1),  # adjust interval as needed
+    schedule_interval=timedelta(minutes=30),  # adjust interval as needed
     start_date=datetime(2023, 1, 1),
     catchup=False,
 ) as dag:
